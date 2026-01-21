@@ -26,7 +26,7 @@ env:
   CROSS_COMPILE: "aarch64-linux-gnu-"
   CLANG_TRIPLE: "aarch64-linux-gnu-"
   CLANG_VERSION: "17"
-  REPO_URL: "https://github.com/Rohail33/Realking_kernel_peridot"
+  REPO_URL: "https://github.com/rickysesi/Realking_kernel_peridot"
   BRANCH: "main"
   BUILD_DIR: "${{ github.workspace }}/kernel-build"
   CONFIG_FILE: "gki_defconfig"
