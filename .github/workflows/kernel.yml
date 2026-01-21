@@ -36,14 +36,10 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     
-    steps:
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ github.event.inputs.repo_url || env.REPO_URL }}
-        ref: ${{ github.event.inputs.branch || env.BRANCH }}
-        submodules: recursive
-        fetch-depth: 0
+    # ✅ 正确的方式
+- uses: actions/checkout@v4
+  with:
+    repository: 'rickysesi/Realking_kernel_peridot'
 
     - name: Set up build environment
       run: |
