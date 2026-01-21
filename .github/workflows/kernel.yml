@@ -13,7 +13,7 @@ on:
         required: false
       config_target:
         description: 'Config target (default: gki_defconfig)'
-        default: 'gki_defconfig'
+        default: 'peridot_defconfig'
         required: false
       use_clang:
         description: 'Use Clang toolchain'
