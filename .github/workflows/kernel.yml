@@ -29,7 +29,7 @@ env:
   REPO_URL: "https://github.com/rickysesi/Realking_kernel_peridot"
   BRANCH: "main"
   BUILD_DIR: "${{ github.workspace }}/kernel-build"
-  CONFIG_FILE: "gki_defconfig"
+  CONFIG_FILE: "peridot_defconfig"
 
 jobs:
   build:
