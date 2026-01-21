@@ -1,311 +1,221 @@
-name: Build Kernel for Snapdragon
+name: GKI Kernel Build
 
 on:
   push:
-    branches: [ main, master ]
-    paths:
-      - 'arch/arm64/**'
-      - 'Makefile'
-      - '.config'
-      - 'scripts/**'
+    branches: [ main, gki-6.1 ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: 'Kernel version/defconfig'
-        required: true
-        default: 'vendor/sm8150-perf_defconfig'
-      target_arch:
-        description: 'Target architecture'
-        required: true
-        default: 'arm64'
-      build_type:
-        description: 'Build type'
-        required: true
-        default: 'perf'
-        type: choice
-        options:
-          - perf
-          - user
-          - userdebug
-      upload_artifact:
-        description: 'Upload build artifact'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+        description: 'Kernel version (default: 6.1)'
+        default: '6.1'
+        required: false
+      config_target:
+        description: 'Config target (default: gki_defconfig)'
+        default: 'gki_defconfig'
+        required: false
+      use_clang:
+        description: 'Use Clang toolchain'
+        default: true
+        required: false
 
 env:
-  KERNEL_DIR: ${{ github.workspace }}
-  BUILD_DIR: ${{ github.workspace }}/out
-  ARCH: arm64
-  CROSS_COMPILE: aarch64-linux-gnu-
-  SUBARCH: arm64
-  KERNEL_MAKE_ENV: "DTC_EXT=/usr/bin/dtc"
+  KERNEL_VERSION: "6.1"
+  ARCH: "arm64"
+  CROSS_COMPILE: "aarch64-linux-gnu-"
+  CLANG_TRIPLE: "aarch64-linux-gnu-"
+  CLANG_VERSION: "17"
+  REPO_URL: "https://android.googlesource.com/kernel/common"
+  BRANCH: "android13-6.1"
+  BUILD_DIR: "${{ github.workspace }}/kernel-build"
+  CONFIG_FILE: "gki_defconfig"
 
 jobs:
-  setup-environment:
-    runs-on: ubuntu-latest
-    outputs:
-      toolchain_url: ${{ steps.set-toolchain.outputs.url }}
-      toolchain_name: ${{ steps.set-toolchain.outputs.name }}
-    steps:
-      - name: Determine Toolchain
-        id: set-toolchain
-        run: |
-          # You can customize toolchain selection here
-          # Clang toolchains are recommended for modern kernels
-          if [[ "${{ github.event.inputs.kernel_version }}" == *"4.19"* ]]; then
-            echo "url=https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r450784d.tar.gz" >> $GITHUB_OUTPUT
-            echo "name=clang-r450784d" >> $GITHUB_OUTPUT
-          else
-            # Default to recent clang for 6.1+ kernels
-            echo "url=https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r510928.tar.gz" >> $GITHUB_OUTPUT
-            echo "name=clang-r510928" >> $GITHUB_OUTPUT
-          fi
-
-  build-kernel:
-    needs: setup-environment
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [ ${{ github.event.inputs.target_arch || 'arm64' }} ]
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
     
     steps:
-    - name: Checkout repository
+    - name: Checkout kernel source
       uses: actions/checkout@v4
       with:
+        repository: ${{ github.event.inputs.repo_url || env.REPO_URL }}
+        ref: ${{ github.event.inputs.branch || env.BRANCH }}
         submodules: recursive
         fetch-depth: 0
 
-    - name: Setup build environment
+    - name: Set up build environment
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           bc \
           bison \
           build-essential \
-          ca-certificates \
-          ccache \
-          curl \
+          cpio \
           flex \
-          gcc-aarch64-linux-gnu \
-          git \
           kmod \
           libelf-dev \
           libssl-dev \
           lz4 \
           lzop \
-          rsync \
-          wget \
-          zip \
+          libncurses-dev \
           python3 \
           python3-pip \
+          git \
+          wget \
+          gcc-aarch64-linux-gnu \
+          libgmp-dev \
+          libmpc-dev \
+          libmpfr-dev \
           device-tree-compiler
         
-        # Install additional Python dependencies
-        pip3 install \
-          pyelftools \
-          protobuf \
-          jinja2
+        # Install newer clang for GKI builds
+        wget https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.CLANG_VERSION }}.0.0/clang+llvm-${{ env.CLANG_VERSION }}.0.0-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+        tar -xf clang+llvm-${{ env.CLANG_VERSION }}.0.0-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+        sudo mv clang+llvm-${{ env.CLANG_VERSION }}.0.0-x86_64-linux-gnu-ubuntu-22.04 /opt/clang-${{ env.CLANG_VERSION }}
 
-    - name: Download and setup toolchain
+    - name: Set environment variables
       run: |
-        mkdir -p ${{ env.BUILD_DIR }}/toolchains
-        cd ${{ env.BUILD_DIR }}/toolchains
-        
-        # Download clang toolchain
-        wget ${{ needs.setup-environment.outputs.toolchain_url }} -O clang.tar.gz
-        tar -xzf clang.tar.gz
-        rm clang.tar.gz
-        
-        # Download gcc toolchain for arm64
-        wget https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/master.tar.gz -O gcc.tar.gz
-        mkdir -p gcc
-        tar -xzf gcc.tar.gz -C gcc
-        rm gcc.tar.gz
-        
-        # Set environment variables
-        echo "CLANG_PATH=${{ env.BUILD_DIR }}/toolchains" >> $GITHUB_ENV
-        echo "GCC_PATH=${{ env.BUILD_DIR }}/toolchains/gcc" >> $GITHUB_ENV
-        echo "PATH=${{ env.BUILD_DIR }}/toolchains/bin:${{ env.BUILD_DIR }}/toolchains/gcc/bin:$PATH" >> $GITHUB_ENV
+        echo "PATH=/opt/clang-${{ env.CLANG_VERSION }}/bin:${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin:$PATH" >> $GITHUB_ENV
+        echo "CLANG_BIN=/opt/clang-${{ env.CLANG_VERSION }}/bin" >> $GITHUB_ENV
+        echo "KERNEL_DIR=${{ github.workspace }}" >> $GITHUB_ENV
+        echo "CC=clang" >> $GITHUB_ENV
+        echo "LD=ld.lld" >> $GITHUB_ENV
+        echo "AR=llvm-ar" >> $GITHUB_ENV
+        echo "NM=llvm-nm" >> $GITHUB_ENV
+        echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+        echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+        echo "STRIP=llvm-strip" >> $GITHUB_ENV
 
-    - name: Setup ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        key: kernel-${{ github.sha }}
-        max-size: 500M
-
-    - name: Determine defconfig
-      id: defconfig
+    - name: Clean kernel tree
       run: |
-        # Auto-detect defconfig or use input
-        DEFCONFIG="${{ github.event.inputs.kernel_version || 'vendor/sm8150-perf_defconfig' }}"
-        
-        # Common Snapdragon defconfigs for reference:
-        # vendor/<chipset>-perf_defconfig (e.g., vendor/sm8150-perf_defconfig for Snapdragon 855)
-        # vendor/<chipset>-qgki_defconfig (for 5.4+ kernels)
-        # arch/arm64/configs/<defconfig>
-        
-        echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_OUTPUT
-        echo "Using defconfig: $DEFCONFIG"
+        cd $KERNEL_DIR
+        make mrproper
 
-    - name: Build Kernel
-      env:
-        DEFCONFIG: ${{ steps.defconfig.outputs.DEFCONFIG }}
-        KERNEL_OUT: ${{ env.BUILD_DIR }}/kernel_out
-        CCACHE_DIR: /home/runner/.ccache
+    - name: Setup config
       run: |
-        mkdir -p $KERNEL_OUT
-        
-        cd ${{ env.KERNEL_DIR }}
-        
-        echo "==================== BUILD CONFIGURATION ===================="
-        echo "Architecture: ${{ env.ARCH }}"
-        echo "Defconfig: $DEFCONFIG"
-        echo "Build Directory: $KERNEL_OUT"
-        echo "Toolchain: ${{ needs.setup-environment.outputs.toolchain_name }}"
-        echo "============================================================"
-        
-        # Set build variables for Snapdragon
-        export KBUILD_BUILD_USER="github-actions"
-        export KBUILD_BUILD_HOST="github"
-        export LLVM=1
-        export LLVM_IAS=1
-        
-        # For Snapdragon kernels, you might need vendor-specific variables
-        # Example for SM8150 (Snapdragon 855):
-        # export CONFIG_BUILD_ARM64_DT_OVERLAY=y
-        
-        # Clean previous builds
-        make O=$KERNEL_OUT clean
-        make O=$KERNEL_OUT mrproper
-        
-        # Generate config
-        echo "[+] Generating kernel configuration..."
-        if [[ "$DEFCONFIG" == *"vendor/"* ]]; then
-          # Vendor defconfig
-          make O=$KERNEL_OUT ARCH=${{ env.ARCH }} CC="ccache clang" CLANG_TRIPLE="aarch64-linux-gnu-" $DEFCONFIG
+        cd $KERNEL_DIR
+        # For GKI builds, we need to set up the proper configuration
+        if [ -f "android/abi_gki_aarch64" ]; then
+          echo "Setting up GKI configuration..."
+          # Build the gki_defconfig with required parameters
+          make ARCH=$ARCH CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE CC=$CC $CONFIG_FILE
         else
-          # Standard defconfig
-          make O=$KERNEL_OUT ARCH=${{ env.ARCH }} CC="ccache clang" $DEFCONFIG
+          echo "No GKI ABI file found, using standard defconfig"
+          make ARCH=$ARCH defconfig
         fi
         
-        # Optional: Modify config for Snapdragon optimizations
-        echo "[+] Applying Snapdragon optimizations..."
-        scripts/config --file $KERNEL_OUT/.config \
-          -e CONFIG_ARCH_QCOM \
-          -e CONFIG_ARM64_CRYPTO \
-          -e CONFIG_CRYPTO_SHA2_ARM64_CE \
-          -e CONFIG_CRYPTO_AES_ARM64_CE_BLK \
-          -e CONFIG_MSM_QMP \
-          -e CONFIG_MSM_PIL
+        # Optional: You can modify config here for Snapdragon-specific options
+        echo "CONFIG_MODULES=y" >> .config
+        echo "CONFIG_MODULE_UNLOAD=y" >> .config
+        echo "CONFIG_MODVERSIONS=y" >> .config
         
-        # Finalize config
-        make O=$KERNEL_OUT ARCH=${{ env.ARCH }} CC="ccache clang" olddefconfig
+        # Make olddefconfig to resolve dependencies
+        make ARCH=$ARCH CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE CC=$CC olddefconfig
+
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+        echo "Starting kernel build..."
         
-        # Build kernel
-        echo "[+] Building kernel..."
-        make O=$KERNEL_OUT ARCH=${{ env.ARCH }} \
-          CC="ccache clang" \
-          CLANG_TRIPLE="aarch64-linux-gnu-" \
-          CROSS_COMPILE="aarch64-linux-android-" \
-          CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
-          -j$(nproc --all) 2>&1 | tee build.log
+        # Build with maximum parallel jobs
+        nproc_count=$(nproc)
+        make -j$((nproc_count * 2)) \
+          ARCH=$ARCH \
+          CLANG_TRIPLE=$CLANG_TRIPLE \
+          CROSS_COMPILE=$CROSS_COMPILE \
+          CC="$CC" \
+          LD="$LD" \
+          AR="$AR" \
+          NM="$NM" \
+          STRIP="$STRIP" \
+          OBJCOPY="$OBJCOPY" \
+          OBJDUMP="$OBJDUMP" \
+          Image.gz-dtb
         
-        # Check if build was successful
-        if [ -f "$KERNEL_OUT/arch/arm64/boot/Image.gz" ] || [ -f "$KERNEL_OUT/arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "[+] Kernel build successful!"
-          
-          # List output files
-          echo "[+] Generated files:"
-          ls -la $KERNEL_OUT/arch/arm64/boot/
-          
-          # Create anykernel3 zip if script exists
-          if [ -f "anykernel3.sh" ]; then
-            echo "[+] Creating flashable zip..."
-            mkdir -p ${{ env.BUILD_DIR }}/anykernel
-            cp $KERNEL_OUT/arch/arm64/boot/Image.gz-dtb ${{ env.BUILD_DIR }}/anykernel/
-            cp -r anykernel/* ${{ env.BUILD_DIR }}/anykernel/ 2>/dev/null || true
-            cd ${{ env.BUILD_DIR }}/anykernel
-            zip -r9 kernel-${{ github.sha }}-${{ github.run_number }}.zip * -x .git
-            cp kernel-${{ github.sha }}-${{ github.run_number }}.zip ${{ env.BUILD_DIR }}/
-          fi
+        # Build modules
+        make -j$((nproc_count * 2)) \
+          ARCH=$ARCH \
+          CLANG_TRIPLE=$CLANG_TRIPLE \
+          CROSS_COMPILE=$CROSS_COMPILE \
+          CC="$CC" \
+          LD="$LD" \
+          AR="$AR" \
+          NM="$NM" \
+          STRIP="$STRIP" \
+          OBJCOPY="$OBJCOPY" \
+          OBJDUMP="$OBJDUMP" \
+          modules
+        
+        echo "Build completed!"
+
+    - name: Verify build artifacts
+      run: |
+        cd $KERNEL_DIR
+        echo "Checking for build artifacts..."
+        
+        # Check for key artifacts
+        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
+          echo "✓ Kernel Image.gz-dtb found"
+          ls -lh arch/arm64/boot/Image.gz-dtb
         else
-          echo "[!] Kernel build failed!"
-          tail -100 build.log
+          echo "✗ Kernel Image.gz-dtb not found!"
           exit 1
         fi
+        
+        if [ -f "arch/arm64/boot/Image" ]; then
+          echo "✓ Raw kernel Image found"
+          ls -lh arch/arm64/boot/Image
+        fi
+        
+        # Check for modules
+        if find . -name "*.ko" | head -5; then
+          echo "✓ Kernel modules built"
+        fi
 
-    - name: Upload build artifacts
-      if: success() && github.event.inputs.upload_artifact != 'false'
+    - name: Package artifacts
+      run: |
+        cd $KERNEL_DIR
+        mkdir -p artifacts
+        
+        # Create a build info file
+        echo "Build Date: $(date)" > artifacts/build-info.txt
+        echo "Commit: ${{ github.sha }}" >> artifacts/build-info.txt
+        echo "Kernel Version: $KERNEL_VERSION" >> artifacts/build-info.txt
+        echo "Architecture: $ARCH" >> artifacts/build-info.txt
+        echo "Toolchain: Clang $CLANG_VERSION" >> artifacts/build-info.txt
+        
+        # Get kernel version string
+        if [ -f "include/config/kernel.release" ]; then
+          echo "Kernel Release: $(cat include/config/kernel.release)" >> artifacts/build-info.txt
+        fi
+        
+        # Copy key artifacts
+        cp arch/arm64/boot/Image.gz-dtb artifacts/
+        cp arch/arm64/boot/Image artifacts/ 2>/dev/null || true
+        
+        # Copy config
+        cp .config artifacts/kernel-config
+        
+        # Create modules tarball
+        mkdir -p artifacts/modules
+        make INSTALL_MOD_PATH=artifacts/modules modules_install
+        tar -czf artifacts/modules.tar.gz -C artifacts/modules .
+        
+        # List artifacts
+        echo "Artifacts created:"
+        ls -lh artifacts/
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-${{ github.sha }}-${{ github.run_number }}
-        path: |
-          ${{ env.BUILD_DIR }}/kernel_out/arch/arm64/boot/
-          ${{ env.BUILD_DIR }}/*.zip
-          ${{ env.KERNEL_DIR }}/build.log
-        retention-days: 7
+        name: kernel-build-${{ github.run_id }}
+        path: ${{ env.KERNEL_DIR }}/artifacts/
+        retention-days: 30
 
-    - name: Upload to release
-      if: success() && startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          ${{ env.BUILD_DIR }}/kernel_out/arch/arm64/boot/Image*
-          ${{ env.BUILD_DIR }}/*.zip
-
-  test-kernel:
-    needs: build-kernel
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: kernel-${{ github.sha }}-${{ github.run_number }}
-        
-    - name: Verify kernel image
+    - name: Create release (optional)
+      if: github.event_name == 'workflow_dispatch'
       run: |
-        echo "[+] Verifying kernel images..."
-        
-        # Check for common kernel image formats
-        if [ -f "Image.gz-dtb" ]; then
-          echo "[✓] Found Image.gz-dtb"
-          file Image.gz-dtb
-        elif [ -f "Image.gz" ]; then
-          echo "[✓] Found Image.gz"
-          file Image.gz
-        elif [ -f "Image" ]; then
-          echo "[✓] Found uncompressed Image"
-          file Image
-        else
-          echo "[!] No kernel image found"
-          ls -la
-        fi
-        
-        # Check for DTBs if present
-        if ls *.dtb 1> /dev/null 2>&1; then
-          echo "[+] Found device tree blobs:"
-          ls *.dtb
-        fi
-
-    - name: Run kernel tests
-      run: |
-        echo "[+] Running basic kernel validation..."
-        # Add your validation scripts here
-        # Example: check kernel version, size, etc.
-        
-        if [ -f "Image.gz-dtb" ]; then
-          KERNEL_SIZE=$(stat -c%s "Image.gz-dtb")
-          echo "Kernel size: $KERNEL_SIZE bytes"
-          
-          if [ $KERNEL_SIZE -lt 10000000 ]; then
-            echo "[!] Warning: Kernel image seems unusually small"
-          fi
-        fi
+        echo "Release can be created manually from artifacts"
+        echo "Built kernel: Image.gz-dtb and modules.tar.gz"
